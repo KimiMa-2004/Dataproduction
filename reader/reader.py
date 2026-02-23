@@ -1,7 +1,7 @@
 '''
 Author: Qimin Ma
 Date: 2026-02-22 11:47:19
-LastEditTime: 2026-02-23 13:09:45
+LastEditTime: 2026-02-24 00:20:36
 FilePath: /Dataset/reader/reader.py
 Description: 
 Copyright (c) 2026 by Qimin Ma, All Rights Reserved.
@@ -30,16 +30,16 @@ def _generate_date_range(start:str, end:str):
     ).sort_values(by="cal_date")
     return df_cal["cal_date"].astype(str).str.replace("-", "").str[:8].values
 
-def LoadConstant(category: str, data_name: str, table_name:str,columns: list[str] = None, condition: str = None):
-    path = f"{DATAROOT}/{category}/{data_name}/{table_name}.parquet"
+def LoadConstant(db_name:str, table_name:str,columns: list[str] = None, condition: str = None):
+    path = f"{DATAROOT}/{db_name}/constant/{table_name}.parquet"
     cols = ", ".join(columns) if columns else "*"
     where = f"{condition}" if condition else ""
     df = duckdb.sql(f"SELECT {cols} FROM read_parquet('{path}'){where}")
     return df
 
 def LoadDaily(
-    category: str,
-    data_name: str,
+    db_name: str,
+    table_name: str,
     start: str,
     end: str,
     columns: list[str] = None,
@@ -47,7 +47,7 @@ def LoadDaily(
     connection: duckdb.DuckDBPyConnection = None,
     duckdb_variable:str=None
     ):
-    DIR = f"{DATAROOT}/{category}/{data_name}"
+    DIR = f"{DATAROOT}/{db_name}/{table_name}"
     date_list = _generate_date_range(start, end)
     paths = [f"'{DIR}/{d}.parquet'" for d in date_list]
     path = "[" + ", ".join(paths) + "]"
@@ -56,6 +56,11 @@ def LoadDaily(
     cols = ", ".join(columns) if columns else "*"
     sql = f"SELECT {cols} FROM read_parquet({path}){condition}"
     if duckdb_variable:
-        connection.sql(f'CREATE TABLE IF NOT EXISTS {duckdb_variable} AS {sql}')
+        if not connection:
+            duckdb.sql(f'DROP TABLE IF EXISTS {duckdb_variable}')
+            duckdb.sql(f'CREATE TABLE IF NOT EXISTS {duckdb_variable} AS {sql}')
+        else:
+            connection.sql(f'DROP TABLE IF EXISTS {duckdb_variable}')
+            connection.sql(f'CREATE TABLE IF NOT EXISTS {duckdb_variable} AS {sql}')
     else:
-        return connection.sql(sql) if connection else duckdb.sql(sql)
+        return duckdb.sql(sql) if connection else duckdb.sql(sql)

@@ -1,8 +1,8 @@
 '''
 Author: Qimin Ma
 Date: 2026-02-19 11:22:20
-LastEditTime: 2026-02-22 11:37:35
-FilePath: /Dataset/raw_tushare/base.py
+LastEditTime: 2026-02-24 00:03:26
+FilePath: /Dataset/base.py
 Description: 
 Copyright (c) 2026 by Qimin Ma, All Rights Reserved.
 '''
@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 import logging
 import os
 from dotenv import load_dotenv, find_dotenv
+from duckdb import table
 import tushare as ts
 from datetime import datetime
 from tqdm import tqdm
@@ -35,19 +36,18 @@ class DataValidationError(Exception):
 
 class Loader(ABC):
     def __init__(self, logger:logging.Logger, 
-                category:str, 
-                dir_name:str, 
-                data_name:str,
+                db_name:str, 
+                table_name:str, 
                 max_retry:int=3,
-                default_delays:list[int] = [1,2,4]
+                default_delays:list[int] = [1,2,4],
+                ifsaved:bool = True
                 ) -> None:
 
         """
         Args:
             logger: logging.Logger, the logger object
-            category: str, the category name
-            dir_name: str, the directory name
-            data_name: str, the data name
+            db_name: str, the database name
+            table_name: str, the table name
             max_retry: int, the maximum number of retries
             default_delays: list[int], the default delays
 
@@ -61,7 +61,8 @@ class Loader(ABC):
         if len(default_delays) != max_retry:
             self.logger.warning(f"The length of default_delays is not equal to max_retry, will use the first {max_retry} delays")
             self.default_delays = self.default_delays[:max_retry]
-        self.data_name = data_name
+        self.ifsaved = ifsaved
+        self.table_name = table_name
 
         # Connect to tushare API
         self._connect_tushare()
@@ -69,9 +70,8 @@ class Loader(ABC):
         # Make the data directory
         data_root = os.environ.get("DATAROOT")
         os.makedirs(data_root, exist_ok=True)
-        self.data_dir = os.path.abspath(f"{data_root}/{category}/{dir_name}")
+        self.data_dir = os.path.abspath(f"{data_root}/{db_name}")
         os.makedirs(self.data_dir, exist_ok=True)
-            
 
     def _set_logger(self):
         try:
@@ -92,25 +92,25 @@ class Loader(ABC):
 # Load trading day
 class TushareConstantLoader(Loader):
     def __init__(self, logger:logging.Logger, 
-                category:str, 
-                dir_name:str, 
-                data_name:str,
+                db_name:str,
+                table_name:str,
                 max_retry:int=3,
-                default_delays:list[int] = [1,2,4]
+                default_delays:list[int] = [1,2,4],
                 ) -> None:
-        super().__init__(logger, category, dir_name, data_name, max_retry, default_delays)
+        super().__init__(logger, db_name, table_name, max_retry, default_delays)
+        os.makedirs(f'{self.data_dir}/constant', exist_ok=True)
         self.run()
 
     def run(self):
         try:
             df = self._run_func_onetime()
             if df is not None and not df.empty:
-                path = f"{self.data_dir}/{self.data_name}.parquet"
+                path = f"{self.data_dir}/constant/{self.table_name}.parquet"
                 df.to_parquet(path, index=False)
-                self.logger.info("Wrote %s -> %s (%d rows)", self.data_name, path, len(df))
+                self.logger.info("Wrote %s -> %s (%d rows)", self.table_name, path, len(df))
         except Exception as e:
-            self.logger.error("Error running %s: %s", self.data_name, e)
-            raise TushareAPIError(f"Error running {self.data_name}: {e}")
+            self.logger.error("Error running %s: %s", self.table_name, e)
+            raise TushareAPIError(f"Error running {self.table_name}: {e}")
 
     @abstractmethod
     def _run_func_onetime(self) -> pd.DataFrame:
@@ -122,18 +122,19 @@ class TushareConstantLoader(Loader):
 class TushareDailyLoader(Loader):
     def __init__(self, 
                 logger: logging.Logger, 
-                category:str,
-                dir_name:str, 
-                data_name:str,
+                db_name:str,
+                table_name:str,
                 start:str='2015-01-01', 
                 end:str=today,
                 max_retry:int=3,
-                default_delays:list[int] = [1,2,4]
+                default_delays:list[int] = [1,2,4],
+                ifsaved:bool = True
                 ) -> None:
-        super().__init__(logger, category, dir_name, data_name, max_retry, default_delays)
+        super().__init__(logger, db_name, table_name, max_retry, default_delays, ifsaved)
 
         self.start = start
         self.end = end
+        os.makedirs(f"{self.data_dir}/{self.table_name}", exist_ok=True)
 
         self.logger.info("Loading data from %s to %s into %s", self.start, self.end, self.data_dir)
         self._date_range()
@@ -158,10 +159,11 @@ class TushareDailyLoader(Loader):
 
 
     def _get_existing_dates(self):
-        if not os.path.isdir(self.data_dir):
+        dir_required = f"{self.data_dir}/{self.table_name}"
+        if not os.path.isdir(dir_required):
             return set()
         existing = set()
-        for name in os.listdir(self.data_dir):
+        for name in os.listdir(dir_required):
             m = DAILY_PARQUET_PATTERN.match(name)
             if m:
                 existing.add(m.group(1))
@@ -175,7 +177,7 @@ class TushareDailyLoader(Loader):
         if missing:
             self.logger.info(
                 "There are %d missing dates in %s (existing %d in folder).",
-                len(missing), self.data_name, len(existing_dates),
+                len(missing), self.table_name, len(existing_dates),
             )
             return missing
         self.logger.info("No missing data, no need to load.")
@@ -183,31 +185,34 @@ class TushareDailyLoader(Loader):
 
     def _run_single_date(self, date: str) -> pd.DataFrame:
         """Run loader for one date; returns DataFrame from _run_func_date_onetime."""
-        self.logger.info(f"Running {self.data_name} for date: {date}")
+        self.logger.info(f"Running {self.table_name} for date: {date}")
         for i in range(self.max_retry):
             try:
                 return self._run_func_date_onetime(date)
             except Exception as e:
-                self.logger.error(f"Error running {self.data_name} for date: {date}, error: {e}")
+                self.logger.error(f"Error running {self.table_name} for date: {date}, error: {e}")
                 if i < self.max_retry - 1:
-                    self.logger.info(f"Retry {i+1} of {self.max_retry} for {self.data_name} for date: {date}")
+                    self.logger.info(f"Retry {i+1} of {self.max_retry} for {self.table_name} for date: {date}")
                     time.sleep(self.default_delays[i])
                 else:
-                    raise TushareAPIError(f"Error running {self.data_name} for date: {date}, error: {e}")
+                    raise TushareAPIError(f"Error running {self.table_name} for date: {date}, error: {e}")
 
     def _daily_file_path(self, date: str) -> str:
-        return os.path.join(self.data_dir, f"{date}.parquet")
+        return f"{self.data_dir}/{self.table_name}/{date}.parquet"
 
     def run(self):
-        for date in tqdm(self.missing_dates, desc=f"Running {self.data_name}"):
+        for date in tqdm(self.missing_dates, desc=f"Running {self.table_name}"):
             try:
                 df = self._run_single_date(date)
-                if df is not None and not df.empty:
-                    path = self._daily_file_path(date)
-                    df.to_parquet(path, index=False)
-                    self.logger.info("Wrote %s -> %s (%d rows)", date, path, len(df))
+                if self.ifsaved:
+                    if df is not None and not df.empty:
+                        path = self._daily_file_path(date)
+                        df.to_parquet(path, index=False)
+                        self.logger.info("Wrote %s -> %s (%d rows)", date, path, len(df))
+                    else:
+                        return df
             except Exception as e:
-                self.logger.error("Error running %s for date %s: %s", self.data_name, date, e)
+                self.logger.error("Error running %s for date %s: %s", self.table_name, date, e)
                 continue
 
 
