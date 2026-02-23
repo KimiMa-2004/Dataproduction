@@ -1,0 +1,61 @@
+'''
+Author: Qimin Ma
+Date: 2026-02-22 11:47:19
+LastEditTime: 2026-02-23 13:09:45
+FilePath: /Dataset/reader/reader.py
+Description: 
+Copyright (c) 2026 by Qimin Ma, All Rights Reserved.
+'''
+
+import duckdb
+import pandas as pd
+import os
+from dotenv import load_dotenv, find_dotenv
+import tushare as ts
+
+load_dotenv(find_dotenv())
+DATAROOT = os.environ.get("DATAROOT")
+TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN")
+pro = ts.pro_api(TUSHARE_TOKEN)
+
+def _generate_date_range(start:str, end:str):
+    start_ymd = start.replace("-", "")[:8]
+    end_ymd = end.replace("-", "")[:8]
+    df_cal = pro.trade_cal(
+        start_date=start_ymd,
+        end_date=end_ymd,
+        fields="cal_date",
+        exchange="SSE",
+        is_open=1,
+    ).sort_values(by="cal_date")
+    return df_cal["cal_date"].astype(str).str.replace("-", "").str[:8].values
+
+def LoadConstant(category: str, data_name: str, table_name:str,columns: list[str] = None, condition: str = None):
+    path = f"{DATAROOT}/{category}/{data_name}/{table_name}.parquet"
+    cols = ", ".join(columns) if columns else "*"
+    where = f"{condition}" if condition else ""
+    df = duckdb.sql(f"SELECT {cols} FROM read_parquet('{path}'){where}")
+    return df
+
+def LoadDaily(
+    category: str,
+    data_name: str,
+    start: str,
+    end: str,
+    columns: list[str] = None,
+    condition: str = None,
+    connection: duckdb.DuckDBPyConnection = None,
+    duckdb_variable:str=None
+    ):
+    DIR = f"{DATAROOT}/{category}/{data_name}"
+    date_list = _generate_date_range(start, end)
+    paths = [f"'{DIR}/{d}.parquet'" for d in date_list]
+    path = "[" + ", ".join(paths) + "]"
+    if path == "[]":
+        return duckdb.query("SELECT 1 AS _ LIMIT 0")
+    cols = ", ".join(columns) if columns else "*"
+    sql = f"SELECT {cols} FROM read_parquet({path}){condition}"
+    if duckdb_variable:
+        connection.sql(f'CREATE TABLE IF NOT EXISTS {duckdb_variable} AS {sql}')
+    else:
+        return connection.sql(sql) if connection else duckdb.sql(sql)

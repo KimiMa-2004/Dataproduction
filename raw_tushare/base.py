@@ -1,0 +1,220 @@
+'''
+Author: Qimin Ma
+Date: 2026-02-19 11:22:20
+LastEditTime: 2026-02-22 11:37:35
+FilePath: /Dataset/raw_tushare/base.py
+Description: 
+Copyright (c) 2026 by Qimin Ma, All Rights Reserved.
+'''
+from abc import ABC, abstractmethod
+import logging
+import os
+from dotenv import load_dotenv, find_dotenv
+import tushare as ts
+from datetime import datetime
+from tqdm import tqdm
+import time
+import pandas as pd
+import re
+
+# Calculate today data: YYYY-MM-DD
+today = datetime.now().strftime('%Y-%m-%d')
+
+DAILY_PARQUET_PATTERN = re.compile(r"^(\d{8})\.parquet$")
+class TushareAPIError(Exception):
+    """Raised when a Tushare API call fails after retries or returns invalid data."""
+
+    pass
+
+
+class DataValidationError(Exception):
+    """Raised when required columns or data are missing or invalid."""
+
+    pass
+
+
+class Loader(ABC):
+    def __init__(self, logger:logging.Logger, 
+                category:str, 
+                dir_name:str, 
+                data_name:str,
+                max_retry:int=3,
+                default_delays:list[int] = [1,2,4]
+                ) -> None:
+
+        """
+        Args:
+            logger: logging.Logger, the logger object
+            category: str, the category name
+            dir_name: str, the directory name
+            data_name: str, the data name
+            max_retry: int, the maximum number of retries
+            default_delays: list[int], the default delays
+
+        The constant data loader is used to load the data without time dimension, such stock info, etc.
+        """
+        # Set the loader and check the environment variables
+        self.logger = logger
+        self._set_logger()
+        self.max_retry = max_retry
+        self.default_delays = default_delays
+        if len(default_delays) != max_retry:
+            self.logger.warning(f"The length of default_delays is not equal to max_retry, will use the first {max_retry} delays")
+            self.default_delays = self.default_delays[:max_retry]
+        self.data_name = data_name
+
+        # Connect to tushare API
+        self._connect_tushare()
+
+        # Make the data directory
+        data_root = os.environ.get("DATAROOT")
+        os.makedirs(data_root, exist_ok=True)
+        self.data_dir = os.path.abspath(f"{data_root}/{category}/{dir_name}")
+        os.makedirs(self.data_dir, exist_ok=True)
+            
+
+    def _set_logger(self):
+        try:
+            load_dotenv(find_dotenv())
+        except Exception as e:
+            self.logger.error(f"Error loading environment variables: {e}")
+            raise TushareAPIError(f"Error loading environment variables: {e}")
+
+    def _connect_tushare(self):
+        TUSHARE_TOKEN = os.environ.get("TUSHARE_TOKEN")
+        self.logger.info(f"Tushare token loaded: {TUSHARE_TOKEN}")
+        try:
+            self.pro = ts.pro_api(TUSHARE_TOKEN)
+        except Exception as e:
+            self.logger.error(f"Error setting Tushare token: {e}")
+            raise TushareAPIError(f"Error setting Tushare token: {e}")
+
+# Load trading day
+class TushareConstantLoader(Loader):
+    def __init__(self, logger:logging.Logger, 
+                category:str, 
+                dir_name:str, 
+                data_name:str,
+                max_retry:int=3,
+                default_delays:list[int] = [1,2,4]
+                ) -> None:
+        super().__init__(logger, category, dir_name, data_name, max_retry, default_delays)
+        self.run()
+
+    def run(self):
+        try:
+            df = self._run_func_onetime()
+            if df is not None and not df.empty:
+                path = f"{self.data_dir}/{self.data_name}.parquet"
+                df.to_parquet(path, index=False)
+                self.logger.info("Wrote %s -> %s (%d rows)", self.data_name, path, len(df))
+        except Exception as e:
+            self.logger.error("Error running %s: %s", self.data_name, e)
+            raise TushareAPIError(f"Error running {self.data_name}: {e}")
+
+    @abstractmethod
+    def _run_func_onetime(self) -> pd.DataFrame:
+        """Fetch data for one time and return as a single DataFrame."""
+        pass
+
+
+
+class TushareDailyLoader(Loader):
+    def __init__(self, 
+                logger: logging.Logger, 
+                category:str,
+                dir_name:str, 
+                data_name:str,
+                start:str='2015-01-01', 
+                end:str=today,
+                max_retry:int=3,
+                default_delays:list[int] = [1,2,4]
+                ) -> None:
+        super().__init__(logger, category, dir_name, data_name, max_retry, default_delays)
+
+        self.start = start
+        self.end = end
+
+        self.logger.info("Loading data from %s to %s into %s", self.start, self.end, self.data_dir)
+        self._date_range()
+        self.missing_dates = self._check_missing_dates()
+        
+        if self.missing_dates:
+            self.logger.info("Start running missing dates...")
+            self.run()
+
+    
+    def _date_range(self):
+        start_ymd = self.start.replace("-", "")[:8]
+        end_ymd = self.end.replace("-", "")[:8]
+        df_cal = self.pro.trade_cal(
+            start_date=start_ymd,
+            end_date=end_ymd,
+            fields="cal_date",
+            exchange="SSE",
+            is_open=1,
+        ).sort_values(by="cal_date")
+        self.date_range = df_cal["cal_date"].astype(str).str.replace("-", "").str[:8].values
+
+
+    def _get_existing_dates(self):
+        if not os.path.isdir(self.data_dir):
+            return set()
+        existing = set()
+        for name in os.listdir(self.data_dir):
+            m = DAILY_PARQUET_PATTERN.match(name)
+            if m:
+                existing.add(m.group(1))
+        return existing
+
+    def _check_missing_dates(self):
+        self.logger.info("Checking missing dates: date_range from calendar, existing from folder.")
+        existing_dates = self._get_existing_dates()
+        date_range_set = set(self.date_range)
+        missing = sorted(date_range_set - existing_dates)
+        if missing:
+            self.logger.info(
+                "There are %d missing dates in %s (existing %d in folder).",
+                len(missing), self.data_name, len(existing_dates),
+            )
+            return missing
+        self.logger.info("No missing data, no need to load.")
+        return None
+
+    def _run_single_date(self, date: str) -> pd.DataFrame:
+        """Run loader for one date; returns DataFrame from _run_func_date_onetime."""
+        self.logger.info(f"Running {self.data_name} for date: {date}")
+        for i in range(self.max_retry):
+            try:
+                return self._run_func_date_onetime(date)
+            except Exception as e:
+                self.logger.error(f"Error running {self.data_name} for date: {date}, error: {e}")
+                if i < self.max_retry - 1:
+                    self.logger.info(f"Retry {i+1} of {self.max_retry} for {self.data_name} for date: {date}")
+                    time.sleep(self.default_delays[i])
+                else:
+                    raise TushareAPIError(f"Error running {self.data_name} for date: {date}, error: {e}")
+
+    def _daily_file_path(self, date: str) -> str:
+        return os.path.join(self.data_dir, f"{date}.parquet")
+
+    def run(self):
+        for date in tqdm(self.missing_dates, desc=f"Running {self.data_name}"):
+            try:
+                df = self._run_single_date(date)
+                if df is not None and not df.empty:
+                    path = self._daily_file_path(date)
+                    df.to_parquet(path, index=False)
+                    self.logger.info("Wrote %s -> %s (%d rows)", date, path, len(df))
+            except Exception as e:
+                self.logger.error("Error running %s for date %s: %s", self.data_name, date, e)
+                continue
+
+
+    @abstractmethod
+    def _run_func_date_onetime(self, date: str) -> pd.DataFrame:
+        """Fetch data for one date and return as a single DataFrame."""
+        pass
+
+
+
