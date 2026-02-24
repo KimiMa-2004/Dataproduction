@@ -1,7 +1,7 @@
 '''
 Author: Qimin Ma
 Date: 2026-02-19 11:22:20
-LastEditTime: 2026-02-24 00:03:26
+LastEditTime: 2026-02-24 20:48:58
 FilePath: /Dataset/base.py
 Description: 
 Copyright (c) 2026 by Qimin Ma, All Rights Reserved.
@@ -17,6 +17,7 @@ from tqdm import tqdm
 import time
 import pandas as pd
 import re
+import duckdb
 
 # Calculate today data: YYYY-MM-DD
 today = datetime.now().strftime('%Y-%m-%d')
@@ -118,6 +119,33 @@ class TushareConstantLoader(Loader):
         pass
 
 
+class TushareBigConstantLoader(Loader):
+    def __init__(self, logger:logging.Logger, 
+                db_name:str,
+                table_name:str,
+                max_retry:int=3,
+                default_delays:list[int] = [1,2,4],
+                ) -> None:
+        super().__init__(logger, db_name, table_name, max_retry, default_delays)
+        os.makedirs(f'{self.data_dir}/constant', exist_ok=True)
+        self.run()
+
+    def run(self):
+        try:
+            duckdb_name = self._run_func_onetime()
+            path = f"{self.data_dir}/constant/{self.table_name}.parquet"
+            if duckdb_name is not None:
+                duckdb.sql(f"COPY {duckdb_name} TO '{path}' (FORMAT 'parquet')")
+                self.logger.info("Created table %s from %s", duckdb_name, self.table_name)
+        except Exception as e:
+            self.logger.error("Error running %s: %s", self.table_name, e)
+            raise TushareAPIError(f"Error running {self.table_name}: {e}")
+
+
+    @abstractmethod
+    def _run_func_onetime(self) -> str:
+        """Fetch data for one time and return as a single DuckDB name."""
+        pass
 
 class TushareDailyLoader(Loader):
     def __init__(self, 
