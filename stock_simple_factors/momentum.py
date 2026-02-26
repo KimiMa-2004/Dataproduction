@@ -92,6 +92,7 @@ class Momentum(TushareBigConstantLoader):
         )
         return 'momentum'
 
+
     def _run_func_onetime(self) -> str:
         self._load_data()
         return self._calculate_momentum_return()

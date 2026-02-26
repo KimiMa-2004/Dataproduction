@@ -1,7 +1,7 @@
 '''
 Author: Qimin Ma
 Date: 2026-02-19 11:22:20
-LastEditTime: 2026-02-24 20:48:58
+LastEditTime: 2026-02-25 21:20:53
 FilePath: /Dataset/base.py
 Description: 
 Copyright (c) 2026 by Qimin Ma, All Rights Reserved.
@@ -127,13 +127,13 @@ class TushareBigConstantLoader(Loader):
                 default_delays:list[int] = [1,2,4],
                 ) -> None:
         super().__init__(logger, db_name, table_name, max_retry, default_delays)
-        os.makedirs(f'{self.data_dir}/constant', exist_ok=True)
+        os.makedirs(f'{self.data_dir}/{table_name}', exist_ok=True)
         self.run()
 
     def run(self):
         try:
             duckdb_name = self._run_func_onetime()
-            path = f"{self.data_dir}/constant/{self.table_name}.parquet"
+            path = f"{self.data_dir}/{self.table_name}/{self.table_name}.parquet"
             if duckdb_name is not None:
                 duckdb.sql(f"COPY {duckdb_name} TO '{path}' (FORMAT 'parquet')")
                 self.logger.info("Created table %s from %s", duckdb_name, self.table_name)
