@@ -1,7 +1,7 @@
 '''
 Author: Qimin Ma
 Date: 2026-02-19 12:24:10
-LastEditTime: 2026-02-26 11:46:03
+LastEditTime: 2026-02-26 18:13:28
 FilePath: /Dataset/main.py
 Description: 
 Copyright (c) 2026 by Qimin Ma, All Rights Reserved.
@@ -42,4 +42,7 @@ if __name__ == "__main__":
         _ = stock_simple_factors.Evaluate(logger, start='2015-01-01')
 
         logger = get_logger(name='volatility_loader', filename='simple_stock_factors',ifconsole=False)
-        _ = stock_simple_factors.Volatility(logger, start='2015-01-01', windows=[5, 21, 63, 126, 252])
+        _ = stock_simple_factors.Volatility(logger, start='2015-01-01')
+
+        logger = get_logger(name='future_return_loader', filename='simple_stock_factors',ifconsole=False)
+        _ = stock_simple_factors.FutureReturn(logger, start='2015-01-01')
